@@ -1,0 +1,66 @@
+name: Classroom Tests
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Cache conda environment
+      uses: actions/cache@v4
+      with:
+        path: ~/.conda/envs/xnap-example
+        key: ${{ runner.os }}-conda-${{ hashFiles('environment.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-conda-
+
+    - name: Install Miniconda
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        auto-update-conda: true
+        python-version: 3.8
+        miniconda-version: "latest"
+
+    - name: Initialize Conda
+      run: conda init bash
+
+    - name: Create empty conda environment and activate it
+      run: | 
+          conda create --name testenv --no-default-packages
+          source ~/.bashrc
+          conda activate testenv
+          python -m pip install pytest pytest-json-report pytest-html pandas matplotlib openpyxl 
+
+    - name: Create or update conda environment
+      run: conda env update --name testenv -f environment.yml
+      shell: bash -l {0}
+
+    - name: Run tests and generate HTML report
+      run: |
+        conda activate testenv
+        pytest --html=report.html
+      shell: bash -l {0}
+
+
+    - name: Run tests
+      run: |
+        python -m unittest discover -s test
+        python test/check_required_files.py
+        python test/check_line_contributions.py 
+        
+    - name: Upload HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: Report
+        path: |
+          report.html
+          informe_contribucio_stacked.png
+          informe_contribucio_total.png
+
