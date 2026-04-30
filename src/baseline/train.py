@@ -16,9 +16,9 @@ import torch
 import torch.nn as nn # aquí s'utilitza per crear la loss nn.CrossEntropyLoss()
 from torch.nn.utils.rnn import pack_padded_sequence # per treballar amb seqüències de longitud variable.
 
-from dataset import get_loaders # els dataloaders són objectes que donen batches amb imatges, captions i longituds.
-from model import DecoderRNN, EncoderCNN # les dues xarxes principals.
-from vocabulary import Vocabulary, build_vocab # construir vocabulari a partir de les captions.
+from src.shared.dataset import get_loaders # els dataloaders són objectes que donen batches amb imatges, captions i longituds.
+from src.baseline.model import DecoderRNN, EncoderCNN # les dues xarxes principals.
+from src.shared.vocabulary import Vocabulary, build_vocab # construir vocabulari a partir de les captions.
 
 
 def parse_args(): # a llegir tots els arguments

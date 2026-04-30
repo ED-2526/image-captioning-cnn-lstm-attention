@@ -19,9 +19,9 @@ from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunct
 # This lets the file work both when it is executed from the project root
 # and when it is executed as a module from a src/ package.
 
-from dataset import split_image_ids # divideix les imatges en train, val i test
-from sample import caption_image, load_checkpoint # genera una caption per una imarge concreta 
-from vocabulary import simple_tokenize # converteix una frase en una llista deparaules/tokens 
+from src.shared.dataset import split_image_ids # divideix les imatges en train, val i test
+from src.baseline.sample import caption_image, load_checkpoint # genera una caption per una imarge concreta 
+from src.shared.vocabulary import simple_tokenize # converteix una frase en una llista deparaules/tokens 
 
 
 
