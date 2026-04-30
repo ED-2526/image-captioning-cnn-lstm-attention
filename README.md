@@ -18,7 +18,7 @@ This project implements two deep learning models capable of generating automatic
 
 | Model | Corpus BLEU-1 | Corpus BLEU-4 |
 |---|---|---|
-| Baseline | — | — |
+| Baseline | 0.568 | 0.176 |
 | **Attention** | **0.634** | **0.215** |
 
 ## Code structure
