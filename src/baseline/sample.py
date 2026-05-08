@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 
 from src.shared.dataset import get_transform # per fer les transformacions de la imatge
-from src.baseline.model import DecoderRNN, EncoderCNN 
+from src.baseline.model import DecoderRNN, EncoderCNN
 from src.shared.vocabulary import Vocabulary  # noqa: F401  (needed for pickle load)
 
 
@@ -34,6 +34,16 @@ def caption_image(image_path: str, encoder, decoder, vocab, device) -> str:
     feat = encoder(x) # troba el vector de característiques de la imatge passant-la per l'encoder
     ids = decoder.sample(feat).cpu().numpy()[0].tolist() # crea la caption (lista d'ids) del vector de característiques passant-lo pel decoder
     return vocab.decode(ids) # tradueix la llista d'ids a text
+
+
+@torch.no_grad()
+def caption_pil_image(pil_img, encoder, decoder, vocab, device) -> str:
+    """Com caption_image però rep un PIL.Image directament (per al dataset HuggingFace)."""
+    tfm = get_transform(train=False)
+    x = tfm(pil_img.convert("RGB")).unsqueeze(0).to(device)
+    feat = encoder(x)
+    ids = decoder.sample(feat).cpu().numpy()[0].tolist()
+    return vocab.decode(ids)
 
 
 def main():
