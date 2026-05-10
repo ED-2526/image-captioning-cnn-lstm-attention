@@ -14,31 +14,43 @@ class EncoderCNN(nn.Module): # com q hereta pto tenir: model.parameters(), .to(d
     def __init__(self, embed_size: int = 256, backbone: str = "resnet50"): # embed_size és la mida del vector de característiques de la imatge
                                                                            # backbone és el tipus de CNN preentrenat a utilitzar (resnet50 o resnet152)
         super().__init__() # obligatori per inicialitzar la classe base nn.Module. Es creen capes internes self.cnn, self.linear, self.bn
-        if backbone == "resnet50": 
-            weights = models.ResNet50_Weights.IMAGENET1K_V2 # carrega la configuració de pesos (la xarxa ja sabrà detectar vores, textures, formes, parts d'objectes...)
-            net = models.resnet50(weights=weights) # crea la xarxa amb els pesos
+        if backbone == "resnet50":
+            try:
+                net = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+            except AttributeError:
+                net = models.resnet50(pretrained=True)
         elif backbone == "resnet152":
-            weights = models.ResNet152_Weights.IMAGENET1K_V2
-            net = models.resnet152(weights=weights)
+            try:
+                net = models.resnet152(weights=models.ResNet152_Weights.IMAGENET1K_V2)
+            except AttributeError:
+                net = models.resnet152(pretrained=True)
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
 
-        modules = list(net.children())[:-1]  # net.children() retorna les capes de la xarxa com a iterador; list() les converteix a llista; [:-1] elimina l'última capa (la de classificació)
-        self.cnn = nn.Sequential(*modules) # crea una xarxa seqüencial amb les capes restants --> self.cnn = conv1. + bn1 + relu + maxpool + layer1 + ... + avgpool
-        self.linear = nn.Linear(net.fc.in_features, embed_size) # net.fc.in_features és la mida de les característiques d'entrada a la capa de classificació original (2048 per resnet50); embed_size és la mida de les característiques de sortida que volem (256)
-                                            # aquesta capa lineal converteix de [B, 2048] a [B, embed_size]
-        self.bn = nn.BatchNorm1d(embed_size, momentum=0.01) # normalització de batch per estabilitzar l'entrenament i millorar la convergència. momentum=0.01 significa que es farà una mitjana mòbil amb un factor de 0.01 per actualitzar les estadístiques de la normalització
+        # Guardem la xarxa sencera i usem les capes per nom al forward
+        # (nn.Sequential trencava les connexions internes de la ResNet)
+        self.net = net
+        self.linear = nn.Linear(net.fc.in_features, embed_size) # [B, 2048] → [B, embed_size]
+        self.bn = nn.BatchNorm1d(embed_size, momentum=0.01)
 
         # Freeze CNN backbone (only fine-tune linear + bn)
-        for p in self.cnn.parameters():
-            p.requires_grad = False # no entrenarem els pesos de la CNN, només els de la capa lineal i la de batchnorm (simplement no calculem els gradients per aquells pesos)
+        for p in self.net.parameters():
+            p.requires_grad = False
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad(): # tot el que està dins d'aquest bloc no calcula gradients (reforça que CNN està congelada)
-            features = self.cnn(images)            # entra [B, 3, 224, 224] i surt [B, C, 1, 1]
-        features = features.flatten(1)             # [B, C]              # aplana el tensor a partir de la dimensió 1
-        features = self.bn(self.linear(features))  # [B, embed_size]     # self.linear converteix de [B, C] a [B, embed_size]; self.bn normalitza vector
-        return features # retorna aquest vector final [B, embed_size] que representa les característiques de la imatge
+        with torch.no_grad():
+            x = self.net.conv1(images)
+            x = self.net.bn1(x)
+            x = self.net.relu(x)
+            x = self.net.maxpool(x)
+            x = self.net.layer1(x)
+            x = self.net.layer2(x)
+            x = self.net.layer3(x)
+            x = self.net.layer4(x)
+            features = self.net.avgpool(x)   # [B, 2048, 1, 1]
+        features = features.flatten(1)       # [B, 2048]
+        features = self.bn(self.linear(features))  # [B, embed_size]
+        return features
 
 
 # DecoderRNN és de tipus LSTM i genera captions (output) a partir del vector de característiques (input).
