@@ -40,8 +40,8 @@ def parse_args(): # a llegir tots els arguments
     p.add_argument("--dropout", type=float, default=0.5) # probabilitat de dropout a la LSTM (regularització que apaga neurones aleatòriament durant l'entrenament per evitar overfitting)
     p.add_argument("--backbone", default="resnet152") # quina CNN preentrenada utilitzar com a encoder (resnet50 o resnet152)
 
-    p.add_argument("--epochs", type=int, default=5) # numero de passades completes del train
-    p.add_argument("--patience", type=int, default=5) # nombre d'epochs que esperarem sense millora en la val_loss abans de parar l'entrenament (early stopping)
+    p.add_argument("--epochs", type=int, default=20) # numero de passades completes del train
+    p.add_argument("--patience", type=int, default=999) # nombre d'epochs que esperarem sense millora en la val_loss abans de parar l'entrenament (early stopping)
     p.add_argument("--batch-size", type=int, default=32) # quantes mostres entrenen el model a cada pas 
     p.add_argument("--num-workers", type=int, default=2) # quants processos paral·lels carregaran dades
     p.add_argument("--lr", type=float, default=1e-3) # de l'optimitzador Adam (la mida del pas d'actualització dels pesos)
@@ -108,6 +108,32 @@ def evaluate(encoder, decoder, loader, criterion, device) -> float:
     return float(np.mean(losses)) # retorna la mitjana de totes les losses de validació
 
 
+@torch.no_grad()
+def evaluate_bleu(encoder, decoder, vocab, val_ids, df_caps, val_pil, args, device) -> dict:
+    """Calcula BLEU-1, BLEU-4 i METEOR sobre el val set. Retorna dict amb les mètriques."""
+    from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+    from nltk.translate.meteor_score import meteor_score
+    encoder.eval()
+    decoder.eval()
+    smooth = SmoothingFunction().method1
+    all_refs, all_hyps, all_meteors = [], [], []
+    for img in val_ids:
+        refs = [simple_tokenize(c) for c in df_caps[df_caps["image"] == img]["caption"].tolist()]
+        if not refs:
+            continue
+        if args.flickr30k_hf:
+            hyp = simple_tokenize(caption_pil_image(val_pil[img], encoder, decoder, vocab, device))
+        else:
+            hyp = simple_tokenize(caption_image(f"{args.images_dir}/{img}", encoder, decoder, vocab, device))
+        all_refs.append(refs)
+        all_hyps.append(hyp)
+        all_meteors.append(meteor_score(refs, hyp))
+    b1 = corpus_bleu(all_refs, all_hyps, weights=(1, 0, 0, 0))
+    b4 = corpus_bleu(all_refs, all_hyps, weights=(.25, .25, .25, .25))
+    m  = float(np.mean(all_meteors))
+    return {"val/bleu1": b1, "val/bleu4": b4, "val/meteor": m}
+
+
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # entrena amb gpu si està disponible, si no cpu
@@ -138,7 +164,9 @@ def main():
             hf_ds, vocab, batch_size=args.batch_size, num_workers=args.num_workers)
 
         full = hf_ds["test"]
+        val_rows  = full.filter(lambda x: x["split"] == "val")
         test_rows = full.filter(lambda x: x["split"] == "test")
+        val_ids   = [r["filename"] for r in val_rows]
         test_ids  = [r["filename"] for r in test_rows]
         records = []
         for r in full:
@@ -146,10 +174,11 @@ def main():
                 records.append({"image": r["filename"], "caption": cap})
         import pandas as _pd
         df_caps_hf = _pd.DataFrame(records)
+        val_pil  = {r["filename"]: r["image"] for r in val_rows}
         test_pil = {r["filename"]: r["image"] for r in test_rows}
     else:
         vocab = get_or_build_vocab(args) # carrega o construeix el vocabulari
-        train_loader, val_loader, _, _ = get_loaders(
+        train_loader, val_loader, _, (_, val_ids, _) = get_loaders(
             images_dir=args.images_dir,
             captions_csv=args.captions_csv,
             vocab=vocab,
@@ -210,13 +239,13 @@ def main():
     train_losses: list[float] = [] # per guardar les losses de l'entrenament
     val_losses: list[float] = [] # losses de la val (de cada epoch)
 
-    best_val_loss = float("inf") # inicialitza la millor loss com infinit 
-    patience_counter = 0 # contador de l'early stopping
+    best_val_loss = float("inf") # inicialitza la millor loss com infinit
     global_step = 0 # comptador de batches processats
     for epoch in range(1, args.epochs + 1): # bucle d'epochs
         encoder.train() # posa l'encoder i el decoder en mode entrenament
-        decoder.train() 
+        decoder.train()
         t0 = time.time() # guarda el temps inicial de la epoch
+        epoch_losses = []
         for i, (images, captions, lengths) in enumerate(train_loader): # recorre tots els batches d'entrenament; i --> index del batch, els altres són les dades del batch
             images = images.to(device, non_blocking=True) # mou les imatges a gpu o cpu. non_blocking pot accelerar la transferència si el DataLoader utilitza memòria pinned (que ho fa)
             captions = captions.to(device, non_blocking=True) # mou les captions al dispositiu
@@ -234,24 +263,35 @@ def main():
             optimizer.step() # actualitza els pesos --> APRÈN yuppi
 
             global_step += 1 # sumem 1 al comptador de batchos
+            epoch_losses.append(loss.item())
             train_losses.append(loss.item()) # guarda la loss del batch
             if i % args.log_step == 0: # comprova si toca imprimir la informació
                 ppl = float(np.exp(min(loss.item(), 20))) # calcula la perplexity (com més baixa millor)
                 print(f"epoch {epoch}/{args.epochs}  step {i}/{len(train_loader)}  "
                       f"loss={loss.item():.4f}  ppl={ppl:.2f}") # imprimeix info de l'entrenament
-                if use_wandb: # si wandb està activat registra mètriques
-                    wandb.log({"train/loss": loss.item(), "train/perplexity": ppl,
-                               "epoch": epoch, "step": global_step})
 
+        train_loss_epoch = float(np.mean(epoch_losses))
+        train_ppl_epoch = float(np.exp(min(train_loss_epoch, 20)))
         val_loss = evaluate(encoder, decoder, val_loader, criterion, device) # validació després de cada epoch, que és la loss mirjana de validació
         val_losses.append(val_loss)
         scheduler.step(val_loss)
         val_ppl = float(np.exp(min(val_loss, 20))) # perplexity de la validació
         elapsed = time.time() - t0 # es tanca el temps per saber quan ha durat la epoch
-        print(f"== epoch {epoch} done  val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}  ({elapsed:.0f}s)")
+        _df_caps_eval = df_caps_hf if args.flickr30k_hf else load_captions_df(args.captions_csv)
+        _val_pil_eval = val_pil if args.flickr30k_hf else None
+        bleu_metrics = evaluate_bleu(encoder, decoder, vocab, val_ids, _df_caps_eval, _val_pil_eval, args, device)
+        print(f"== epoch {epoch} done  train_loss={train_loss_epoch:.4f}  val_loss={val_loss:.4f}  "
+              f"bleu4={bleu_metrics['val/bleu4']:.3f}  meteor={bleu_metrics['val/meteor']:.3f}  ({elapsed:.0f}s)")
         if use_wandb:
-            wandb.log({"val/loss": val_loss, "val/perplexity": val_ppl, "epoch": epoch,
-                       "lr": optimizer.param_groups[0]["lr"]}) # registra metriques a wandb
+            wandb.log({
+                "train/loss": train_loss_epoch,
+                "train/perplexity": train_ppl_epoch,
+                "val/loss": val_loss,
+                "val/perplexity": val_ppl,
+                **bleu_metrics,
+                "epoch": epoch,
+                "lr": optimizer.param_groups[0]["lr"],
+            }) # registra metriques a wandb
 
         ckpt = { # diccionari amb la info que es vol guardar
             "epoch": epoch, # en quina epoch s'ha guardat el checkpoin
@@ -266,16 +306,9 @@ def main():
 
         if val_loss < best_val_loss: # comprova si la validació ha millorat
             best_val_loss = val_loss # actualitza la millor loss
-            patience_counter = 0 # reinicia comptador de paciència
             best_out = Path(args.checkpoints_dir) / "ckpt_best.pt" # defineix la ruta del millor model
             torch.save(ckpt, best_out) # guarda
-            print(f"[early_stop] new best val_loss={best_val_loss:.4f} -> saved ckpt_best.pt") # mostra que hi ha un nou millor model
-        else: # si validació no ha millorat
-            patience_counter += 1 # incrementa comptador de paciència
-            print(f"[early_stop] no improvement ({patience_counter}/{args.patience})") # mostra quantes epochs seguides sense millorar
-            if patience_counter >= args.patience: # si hem arribat al límit de paciència
-                print(f"[early_stop] patience exhausted, stopping at epoch {epoch}") # mostra que l'entrenament s'atura
-                break
+            print(f"[best] new best val_loss={best_val_loss:.4f} -> saved ckpt_best.pt") # mostra que hi ha un nou millor model
 
     # --- loss curve ---
     steps_per_epoch = len(train_loader) # quarda quants batches té una epoch
