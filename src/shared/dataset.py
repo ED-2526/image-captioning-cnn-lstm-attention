@@ -144,39 +144,6 @@ def collate_fn(batch):
     return images, targets, lengths
 
 
-def collate_fn_scst(batch):
-    """Like collate_fn but each sample is (image, caption, img_id). Returns img_ids too."""
-    batch.sort(key=lambda x: len(x[1]), reverse=True)
-    images, caps, img_ids = zip(*batch)
-    images = torch.stack(images, dim=0)
-    lengths = [len(c) for c in caps]
-    targets = torch.zeros(len(caps), max(lengths), dtype=torch.long)
-    for i, c in enumerate(caps):
-        targets[i, :lengths[i]] = c
-    return images, targets, lengths, list(img_ids)
-
-
-def get_scst_loader(
-    images_dir: str | Path,
-    captions_csv: str | Path,
-    vocab: Vocabulary,
-    train_ids: list[str],
-    batch_size: int = 16,
-    num_workers: int = 2,
-    image_size: int = 224,
-) -> DataLoader:
-    """DataLoader for SCST training — returns (images, captions, lengths, img_ids)."""
-    ds = Flickr8kDataset(
-        images_dir, captions_csv, vocab,
-        transform=get_transform(image_size, train=True),
-        image_ids=train_ids,
-        return_image_id=True,
-    )
-    return DataLoader(
-        ds, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, collate_fn=collate_fn_scst, pin_memory=True,
-    )
-
 
 def split_image_ids(captions_csv: str | Path, val_size: int = 1000, test_size: int = 1000, seed: int = 42):
     """Split unique image filenames into train/val/test (Karpathy-style)."""
@@ -322,17 +289,3 @@ def get_loaders_hf(
     return train_loader, val_loader, test_loader
 
 
-def get_scst_loader_hf(
-    hf_dataset,
-    vocab: Vocabulary,
-    batch_size: int = 16,
-    num_workers: int = 2,
-    image_size: int = 224,
-) -> DataLoader:
-    """DataLoader SCST per Flickr30k HF — retorna (images, captions, lengths, img_ids)."""
-    full = hf_dataset["test"]
-    train_hf = full.filter(lambda x: x["split"] == "train")
-    ds = Flickr30kHFDataset(train_hf, vocab, get_transform(image_size, train=True),
-                            return_image_id=True)
-    return DataLoader(ds, batch_size=batch_size, shuffle=True,
-                      num_workers=num_workers, collate_fn=collate_fn_scst, pin_memory=True)
