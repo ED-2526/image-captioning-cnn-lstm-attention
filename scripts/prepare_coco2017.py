@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Prepare COCO 2017 captions for the existing Flickr-style loader.
 
-Expected input after downloading COCO:
-  data/coco2017/train2017/*.jpg
-  data/coco2017/val2017/*.jpg
-  data/coco2017/annotations/captions_train2017.json
-  data/coco2017/annotations/captions_val2017.json
+Expected input:
+  /home/datasets/coco/train2017/*.jpg
+  /home/datasets/coco/val2017/*.jpg
+  /home/datasets/coco/annotations/captions_train2017.json
+  /home/datasets/coco/annotations/captions_val2017.json
 
 Outputs:
   data/coco2017/Images/*.jpg       symlinks to train2017/val2017 images
   data/coco2017/captions.txt       CSV with columns image,caption
+  data/coco2017/train2017          symlink to the source folder
+  data/coco2017/val2017            symlink to the source folder
+  data/coco2017/annotations        symlink to the source folder
 """
 from __future__ import annotations
 
@@ -31,6 +34,16 @@ def load_caption_rows(annotation_path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def replace_symlink(target: Path, source: Path) -> None:
+    if target.is_symlink():
+        if target.resolve() == source.resolve():
+            return
+        target.unlink()
+    elif target.exists():
+        return
+    target.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+
+
 def symlink_images(source_dir: Path, images_dir: Path) -> int:
     count = 0
     for image_path in source_dir.glob("*.jpg"):
@@ -44,19 +57,26 @@ def symlink_images(source_dir: Path, images_dir: Path) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default="data/coco2017")
+    parser.add_argument("--source-root", default="/home/datasets/coco")
+    parser.add_argument("--root", "--out-root", default="data/coco2017")
     args = parser.parse_args()
 
+    source_root = Path(args.source_root)
     root = Path(args.root)
-    train_ann = root / "annotations" / "captions_train2017.json"
-    val_ann = root / "annotations" / "captions_val2017.json"
-    train_images = root / "train2017"
-    val_images = root / "val2017"
+    train_ann = source_root / "annotations" / "captions_train2017.json"
+    val_ann = source_root / "annotations" / "captions_val2017.json"
+    train_images = source_root / "train2017"
+    val_images = source_root / "val2017"
 
     required = [train_ann, val_ann, train_images, val_images]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise SystemExit("Missing COCO files/folders:\n" + "\n".join(missing))
+
+    root.mkdir(parents=True, exist_ok=True)
+    replace_symlink(root / "train2017", train_images)
+    replace_symlink(root / "val2017", val_images)
+    replace_symlink(root / "annotations", source_root / "annotations")
 
     images_dir = root / "Images"
     images_dir.mkdir(parents=True, exist_ok=True)

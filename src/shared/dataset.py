@@ -167,8 +167,17 @@ def get_loaders(
     batch_size: int = 32,
     num_workers: int = 2,
     image_size: int = 224,
+    max_train_images: int | None = None,
+    max_val_images: int | None = None,
+    max_test_images: int | None = None,
 ):
     train_ids, val_ids, test_ids = split_image_ids(captions_csv)
+    if max_train_images is not None:
+        train_ids = train_ids[:max_train_images]
+    if max_val_images is not None:
+        val_ids = val_ids[:max_val_images]
+    if max_test_images is not None:
+        test_ids = test_ids[:max_test_images]
 
     train_ds = Flickr8kDataset(images_dir, captions_csv, vocab,
                                transform=get_transform(image_size, train=True),
@@ -256,6 +265,9 @@ def get_loaders_hf(
     batch_size: int = 32,
     num_workers: int = 2,
     image_size: int = 224,
+    max_train_images: int | None = None,
+    max_val_images: int | None = None,
+    max_test_images: int | None = None,
 ):
     """Crea DataLoaders per Flickr30k des del dataset HuggingFace.
 
@@ -274,6 +286,12 @@ def get_loaders_hf(
     train_hf = full.filter(lambda x: x["split"] == "train")
     val_hf   = full.filter(lambda x: x["split"] == "val")
     test_hf  = full.filter(lambda x: x["split"] == "test")
+    if max_train_images is not None:
+        train_hf = train_hf.select(range(min(max_train_images, len(train_hf))))
+    if max_val_images is not None:
+        val_hf = val_hf.select(range(min(max_val_images, len(val_hf))))
+    if max_test_images is not None:
+        test_hf = test_hf.select(range(min(max_test_images, len(test_hf))))
 
     train_ds = Flickr30kHFDataset(train_hf, vocab, get_transform(image_size, train=True))
     val_ds   = Flickr30kHFDataset(val_hf,   vocab, get_transform(image_size, train=False))
@@ -287,5 +305,4 @@ def get_loaders_hf(
                               num_workers=num_workers, collate_fn=collate_fn, pin_memory=True)
 
     return train_loader, val_loader, test_loader
-
 

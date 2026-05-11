@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
 import time
 from pathlib import Path
@@ -52,7 +53,8 @@ def parse_args():
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--attention-dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--backbone", default="resnet152", choices=["resnet50", "resnet152", "efficientnet_b0"])
+    parser.add_argument("--backbone", default="resnet152", choices=["resnet50", "resnet152", "efficientnet_b0", "vgg16"])
+    parser.add_argument("--no-pretrained-backbone", action="store_true")
     parser.add_argument("--decoder-direction", default="uni", choices=["uni", "bidir"])
 
     parser.add_argument("--epochs", type=int, default=20)
@@ -79,33 +81,68 @@ def parse_args():
 
     parser.add_argument("--flickr30k-hf", action="store_true")
     parser.add_argument("--flickr30k-hf-cache", default="dataset/flickr30k_hf")
+    parser.add_argument("--max-train-images", type=int, default=None)
+    parser.add_argument("--max-val-images", type=int, default=None)
+    parser.add_argument("--max-test-images", type=int, default=None)
 
     parser.add_argument("--skip-test-captioning", action="store_true")
+    parser.add_argument("--checkpoint-mode", default="full", choices=["full", "light", "none"])
+    parser.add_argument("--save-every-epoch", action="store_true")
+    parser.add_argument("--skip-local-artifacts", action="store_true")
 
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb-project", default="image-captioning")
+    parser.add_argument("--wandb-project", default="altre_net")
     parser.add_argument("--wandb-entity", default=None)
+    parser.add_argument("--wandb-group", default=None)
+    parser.add_argument("--wandb-job-type", default=None)
+    parser.add_argument("--wandb-tags", default="")
+    parser.add_argument("--wandb-rich", action="store_true")
     parser.add_argument("--run-name", default=None)
     return parser.parse_args()
 
 
 def safe_save(obj, path, retries: int = 5):
+    import os
     import shutil
+    import tempfile
     import time as time_module
 
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(os.environ.get("CHECKPOINT_TMPDIR", "/tmp"))
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
     for attempt in range(retries):
+        tmp = None
         try:
-            tmp = path.parent / f".tmp_{path.name}"
-            torch.save(obj, tmp)
-            shutil.move(str(tmp), str(path))
+            with tempfile.NamedTemporaryFile(
+                prefix=f"{path.name}.",
+                suffix=".tmp",
+                dir=tmp_dir,
+                delete=False,
+            ) as f:
+                tmp = Path(f.name)
+            torch.save(obj, tmp, _use_new_zipfile_serialization=False)
+            shutil.copy2(tmp, path)
+            tmp.unlink(missing_ok=True)
             return
-        except RuntimeError:
+        except (RuntimeError, OSError, IOError) as exc:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
             if attempt < retries - 1:
-                print(f"[ckpt] error NFS (intent {attempt + 1}/{retries}), reintentant...")
+                print(f"[ckpt] save error ({exc}); retry {attempt + 1}/{retries}...")
                 time_module.sleep(3)
             else:
                 raise
+
+
+def encoder_checkpoint_state(encoder, checkpoint_mode: str) -> dict:
+    if checkpoint_mode == "full":
+        return encoder.state_dict()
+    if checkpoint_mode == "light":
+        trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+        return {k: v for k, v in encoder.state_dict().items() if k in trainable}
+    return {}
 
 
 def get_or_build_vocab(args) -> Vocabulary:
@@ -183,7 +220,8 @@ def main():
     if args.scheduler == "cyclic" and args.finetune_cnn_epoch is not None:
         raise ValueError("CyclicLR is not supported together with --finetune-cnn-epoch because the optimizer param groups change mid-run.")
 
-    Path(args.checkpoints_dir).mkdir(parents=True, exist_ok=True)
+    if args.checkpoint_mode != "none" or not args.skip_local_artifacts:
+        Path(args.checkpoints_dir).mkdir(parents=True, exist_ok=True)
 
     if args.flickr30k_hf:
         from datasets import load_dataset
@@ -205,11 +243,21 @@ def main():
             print(f"[vocab] built and saved to {vocab_path} (size={len(vocab)})")
 
         train_loader, val_loader, _ = get_loaders_hf(
-            hf_ds, vocab, batch_size=args.batch_size, num_workers=args.num_workers
+            hf_ds,
+            vocab,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            max_train_images=args.max_train_images,
+            max_val_images=args.max_val_images,
+            max_test_images=args.max_test_images,
         )
         full = hf_ds["test"]
         val_rows = full.filter(lambda x: x["split"] == "val")
         test_rows = full.filter(lambda x: x["split"] == "test")
+        if args.max_val_images is not None:
+            val_rows = val_rows.select(range(min(args.max_val_images, len(val_rows))))
+        if args.max_test_images is not None:
+            test_rows = test_rows.select(range(min(args.max_test_images, len(test_rows))))
         val_ids = [row["filename"] for row in val_rows]
         test_ids = [row["filename"] for row in test_rows]
         records = []
@@ -227,6 +275,9 @@ def main():
             vocab=vocab,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            max_train_images=args.max_train_images,
+            max_val_images=args.max_val_images,
+            max_test_images=args.max_test_images,
         )
         df_caps = load_captions_df(args.captions_csv)
         val_pil = None
@@ -235,7 +286,10 @@ def main():
     print(f"[vocab] size = {len(vocab)}")
     print(f"[data] train batches={len(train_loader)}  val batches={len(val_loader)}")
 
-    encoder = EncoderCNNAttention(backbone=args.backbone).to(device)
+    encoder = EncoderCNNAttention(
+        backbone=args.backbone,
+        pretrained=not args.no_pretrained_backbone,
+    ).to(device)
 
     pretrained_weights = None
     if args.glove_path:
@@ -285,7 +339,16 @@ def main():
     if use_wandb:
         import wandb
 
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.run_name, config=vars(args))
+        wandb_tags = [tag for tag in args.wandb_tags.split(",") if tag]
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.run_name,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            tags=wandb_tags,
+            config=vars(args),
+        )
         wandb.config.update(
             {
                 "vocab_size": len(vocab),
@@ -382,7 +445,7 @@ def main():
                 "epoch": epoch,
                 "lr": optimizer.param_groups[0]["lr"],
             }
-            if generation_supported(args) and val_quality_summary["total"] > 0:
+            if args.wandb_rich and generation_supported(args) and val_quality_summary["total"] > 0:
                 quality_table = wandb.Table(
                     data=quality_breakdown_rows(val_quality_summary),
                     columns=["quality_band", "count", "percentage"],
@@ -395,21 +458,26 @@ def main():
                 )
             wandb.log(log_payload)
 
-        ckpt = {
-            "epoch": epoch,
-            "encoder": encoder.state_dict(),
-            "decoder": decoder.state_dict(),
-            "vocab_size": len(vocab),
-            "args": vars(args),
-        }
-        out = Path(args.checkpoints_dir) / f"ckpt_epoch{epoch}.pt"
-        safe_save(ckpt, out)
-        print(f"[ckpt] saved {out}")
+        if args.checkpoint_mode == "none":
+            print("[ckpt] skipped (--checkpoint-mode none)")
+        else:
+            ckpt = {
+                "epoch": epoch,
+                "encoder": encoder_checkpoint_state(encoder, args.checkpoint_mode),
+                "decoder": decoder.state_dict(),
+                "vocab_size": len(vocab),
+                "args": vars(args),
+                "checkpoint_mode": args.checkpoint_mode,
+            }
+            if args.save_every_epoch:
+                out = Path(args.checkpoints_dir) / f"ckpt_epoch{epoch}.pt"
+                safe_save(ckpt, out)
+                print(f"[ckpt] saved {out} ({args.checkpoint_mode})")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            safe_save(ckpt, Path(args.checkpoints_dir) / "ckpt_best.pt")
-            print(f"[best] new best val_loss={best_val_loss:.4f} -> saved ckpt_best.pt")
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                safe_save(ckpt, Path(args.checkpoints_dir) / "ckpt_best.pt")
+                print(f"[best] new best val_loss={best_val_loss:.4f} -> saved ckpt_best.pt")
 
     if train_losses:
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -423,18 +491,25 @@ def main():
         axes[1].set_ylabel("cross-entropy loss")
         axes[1].set_title("Val loss per epoch (attention)")
         axes[1].legend()
-        plt.tight_layout()
-        plot_path = Path(args.checkpoints_dir) / "loss_curve.png"
-        plt.savefig(plot_path, dpi=150)
-        plt.close()
-        print(f"[plot] saved {plot_path}")
+        if args.skip_local_artifacts:
+            plt.close()
+            print("[plot] skipped (--skip-local-artifacts)")
+        else:
+            plt.tight_layout()
+            plot_path = Path(args.checkpoints_dir) / "loss_curve.png"
+            plt.savefig(plot_path, dpi=150)
+            plt.close()
+            print(f"[plot] saved {plot_path}")
 
+    final_test_metrics = {}
     if args.skip_test_captioning or not generation_supported(args):
         reason = "requested via --skip-test-captioning" if args.skip_test_captioning else f"decoder_direction={args.decoder_direction}"
         print(f"[test] caption generation skipped ({reason})")
         if use_wandb:
             wandb.summary["test_captioning_skipped"] = True
             wandb.summary["test_captioning_skip_reason"] = reason
+    elif args.checkpoint_mode == "none":
+        print("[test] caption generation skipped (--checkpoint-mode none leaves no best checkpoint)")
     else:
         import nltk
 
@@ -442,7 +517,7 @@ def main():
         nltk.download("omw-1.4", quiet=True)
         print("\n[bleu+meteor] avaluant sobre el conjunt de test...")
         best_ckpt = torch.load(Path(args.checkpoints_dir) / "ckpt_best.pt", map_location=device)
-        encoder.load_state_dict(best_ckpt["encoder"])
+        encoder.load_state_dict(best_ckpt["encoder"], strict=best_ckpt.get("checkpoint_mode", "full") == "full")
         decoder.load_state_dict(best_ckpt["decoder"])
         encoder.eval()
         decoder.eval()
@@ -461,7 +536,7 @@ def main():
                     "quality_band",
                 ]
             )
-            if use_wandb
+            if use_wandb and args.wandb_rich
             else None
         )
         images_dir_abs = Path(args.images_dir).resolve()
@@ -509,6 +584,7 @@ def main():
                     )
 
         test_caption_metrics, test_quality_summary = aggregate_caption_scores(eval_samples, prefix="test")
+        final_test_metrics = test_caption_metrics
         print("-" * 130)
         print(
             f"[caption] Corpus BLEU-1: {test_caption_metrics['test/bleu1']:.3f}  "
@@ -518,29 +594,51 @@ def main():
         )
 
         if use_wandb:
-            quality_table = wandb.Table(
-                data=quality_breakdown_rows(test_quality_summary),
-                columns=["quality_band", "count", "percentage"],
-            )
-            wandb.log(
-                {
-                    "caption/corpus_bleu1": test_caption_metrics["test/bleu1"],
-                    "caption/corpus_bleu4": test_caption_metrics["test/bleu4"],
-                    "caption/meteor": test_caption_metrics["test/meteor"],
-                    "caption/token_overlap_f1": test_caption_metrics["test/token_overlap_f1"],
-                    "caption/accuracy_pct": test_caption_metrics["test/caption_accuracy_pct"],
-                    "caption/partial_pct": test_caption_metrics["test/caption_partial_pct"],
-                    "caption/bad_pct": test_caption_metrics["test/caption_bad_pct"],
-                    "caption/quality_score_pct": test_caption_metrics["test/caption_quality_score_pct"],
-                    "caption/quality_bar": wandb.plot.bar(
-                        quality_table,
-                        "quality_band",
-                        "percentage",
-                        title="Test Caption Quality (%)",
-                    ),
-                    "caption/eval_table": bleu_table,
-                }
-            )
+            caption_payload = {
+                "caption/corpus_bleu1": test_caption_metrics["test/bleu1"],
+                "caption/corpus_bleu4": test_caption_metrics["test/bleu4"],
+                "caption/meteor": test_caption_metrics["test/meteor"],
+                "caption/token_overlap_f1": test_caption_metrics["test/token_overlap_f1"],
+                "caption/accuracy_pct": test_caption_metrics["test/caption_accuracy_pct"],
+                "caption/partial_pct": test_caption_metrics["test/caption_partial_pct"],
+                "caption/bad_pct": test_caption_metrics["test/caption_bad_pct"],
+                "caption/quality_score_pct": test_caption_metrics["test/caption_quality_score_pct"],
+            }
+            if args.wandb_rich:
+                quality_table = wandb.Table(
+                    data=quality_breakdown_rows(test_quality_summary),
+                    columns=["quality_band", "count", "percentage"],
+                )
+                caption_payload["caption/quality_bar"] = wandb.plot.bar(
+                    quality_table,
+                    "quality_band",
+                    "percentage",
+                    title="Test Caption Quality (%)",
+                )
+                caption_payload["caption/eval_table"] = bleu_table
+            wandb.log(caption_payload)
+
+    metrics_summary = {
+        "run_name": args.run_name,
+        "architecture": "attention",
+        "wandb_project": args.wandb_project,
+        "wandb_group": args.wandb_group,
+        "backbone": args.backbone,
+        "embedding_type": emb_type,
+        "loss_type": loss_tag,
+        "decoder_direction": args.decoder_direction,
+        "best_val_loss": None if best_val_loss == float("inf") else best_val_loss,
+        "final_train_loss": None if not train_losses else train_losses[-1],
+        "final_val_loss": None if not val_losses else val_losses[-1],
+        "test_metrics": final_test_metrics,
+    }
+    if args.skip_local_artifacts:
+        print("[metrics] local metrics skipped (--skip-local-artifacts)")
+    else:
+        metrics_path = Path(args.checkpoints_dir) / "metrics.json"
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(json.dumps(metrics_summary, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"[metrics] saved {metrics_path}")
 
     if use_wandb:
         wandb.finish()

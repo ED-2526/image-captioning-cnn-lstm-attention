@@ -7,35 +7,45 @@ import torchvision.models as models
 from torch.nn.utils.rnn import pack_padded_sequence
 
 
-def _load_backbone(backbone: str):
+def _load_backbone(backbone: str, pretrained: bool = True):
     if backbone == "resnet50":
         try:
-            net = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        except AttributeError:
-            net = models.resnet50(pretrained=True)
+            weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+            net = models.resnet50(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.resnet50(pretrained=pretrained)
         return net, net.fc.in_features, "resnet"
     if backbone == "resnet152":
         try:
-            net = models.resnet152(weights=models.ResNet152_Weights.IMAGENET1K_V2)
-        except AttributeError:
-            net = models.resnet152(pretrained=True)
+            weights = models.ResNet152_Weights.IMAGENET1K_V2 if pretrained else None
+            net = models.resnet152(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.resnet152(pretrained=pretrained)
         return net, net.fc.in_features, "resnet"
     if backbone == "efficientnet_b0":
         try:
-            net = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-        except AttributeError:
-            net = models.efficientnet_b0(pretrained=True)
+            weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+            net = models.efficientnet_b0(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.efficientnet_b0(pretrained=pretrained)
         return net, net.classifier[1].in_features, "efficientnet"
+    if backbone == "vgg16":
+        try:
+            weights = models.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
+            net = models.vgg16(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.vgg16(pretrained=pretrained)
+        return net, net.classifier[0].in_features, "vgg"
     raise ValueError(f"Unsupported backbone: {backbone}")
 
 
 class EncoderCNN(nn.Module):
     """Frozen CNN encoder that projects image features into `embed_size`."""
 
-    def __init__(self, embed_size: int = 256, backbone: str = "resnet50"):
+    def __init__(self, embed_size: int = 256, backbone: str = "resnet50", pretrained: bool = True):
         super().__init__()
         self.backbone = backbone
-        self.net, feature_dim, self.backbone_kind = _load_backbone(backbone)
+        self.net, feature_dim, self.backbone_kind = _load_backbone(backbone, pretrained=pretrained)
         self.linear = nn.Linear(feature_dim, embed_size)
         self.bn = nn.BatchNorm1d(embed_size, momentum=0.01)
 
@@ -53,6 +63,9 @@ class EncoderCNN(nn.Module):
                 x = self.net.layer2(x)
                 x = self.net.layer3(x)
                 x = self.net.layer4(x)
+                features = self.net.avgpool(x)
+            elif self.backbone_kind == "efficientnet":
+                x = self.net.features(images)
                 features = self.net.avgpool(x)
             else:
                 x = self.net.features(images)

@@ -26,7 +26,8 @@ def load_checkpoint(ckpt_path: str, vocab_path: str, device: torch.device):
         vocab = pickle.load(f)
     ckpt = torch.load(ckpt_path, map_location=device)
     args = ckpt["args"]
-    encoder = EncoderCNNAttention(backbone=args["backbone"]).to(device).eval()
+    pretrained = ckpt.get("checkpoint_mode") == "light" and not args.get("no_pretrained_backbone", False)
+    encoder = EncoderCNNAttention(backbone=args["backbone"], pretrained=pretrained).to(device).eval()
     decoder = AttentionDecoder(
         encoder_dim=encoder.encoder_dim,
         embed_size=args["embed_size"],
@@ -36,7 +37,7 @@ def load_checkpoint(ckpt_path: str, vocab_path: str, device: torch.device):
         dropout=args.get("dropout", 0.5),
         decoder_direction=args.get("decoder_direction", "uni"),
     ).to(device).eval()
-    encoder.load_state_dict(ckpt["encoder"])
+    encoder.load_state_dict(ckpt["encoder"], strict=ckpt.get("checkpoint_mode", "full") == "full")
     decoder.load_state_dict(ckpt["decoder"])
     return encoder, decoder, vocab
 

@@ -7,35 +7,45 @@ import torchvision.models as models
 from torch.nn.utils.rnn import pack_padded_sequence
 
 
-def _load_backbone(backbone: str):
+def _load_backbone(backbone: str, pretrained: bool = True):
     if backbone == "resnet50":
         try:
-            net = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        except AttributeError:
-            net = models.resnet50(pretrained=True)
+            weights = models.ResNet50_Weights.IMAGENET1K_V2 if pretrained else None
+            net = models.resnet50(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.resnet50(pretrained=pretrained)
         return net, 2048, "resnet"
     if backbone == "resnet152":
         try:
-            net = models.resnet152(weights=models.ResNet152_Weights.IMAGENET1K_V2)
-        except AttributeError:
-            net = models.resnet152(pretrained=True)
+            weights = models.ResNet152_Weights.IMAGENET1K_V2 if pretrained else None
+            net = models.resnet152(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.resnet152(pretrained=pretrained)
         return net, 2048, "resnet"
     if backbone == "efficientnet_b0":
         try:
-            net = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-        except AttributeError:
-            net = models.efficientnet_b0(pretrained=True)
+            weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
+            net = models.efficientnet_b0(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.efficientnet_b0(pretrained=pretrained)
         return net, 1280, "efficientnet"
+    if backbone == "vgg16":
+        try:
+            weights = models.VGG16_Weights.IMAGENET1K_V1 if pretrained else None
+            net = models.vgg16(weights=weights)
+        except (AttributeError, TypeError):
+            net = models.vgg16(pretrained=pretrained)
+        return net, 512, "vgg"
     raise ValueError(f"Unsupported backbone: {backbone}")
 
 
 class EncoderCNNAttention(nn.Module):
     """CNN encoder that outputs a spatial grid of features for attention."""
 
-    def __init__(self, backbone: str = "resnet50"):
+    def __init__(self, backbone: str = "resnet50", pretrained: bool = True):
         super().__init__()
         self.backbone = backbone
-        self.net, self.encoder_dim, self.backbone_kind = _load_backbone(backbone)
+        self.net, self.encoder_dim, self.backbone_kind = _load_backbone(backbone, pretrained=pretrained)
 
         for param in self.net.parameters():
             param.requires_grad = False
@@ -44,13 +54,18 @@ class EncoderCNNAttention(nn.Module):
         if self.backbone_kind == "efficientnet":
             self._eff_prefix = self.net.features[:-2]
             self._eff_tunable = self.net.features[-2:]
+        elif self.backbone_kind == "vgg":
+            self._vgg_prefix = self.net.features[:-7]
+            self._vgg_tunable = self.net.features[-7:]
 
     def enable_finetuning(self):
         self.finetuning = True
         if self.backbone_kind == "resnet":
             modules = [self.net.layer4]
-        else:
+        elif self.backbone_kind == "efficientnet":
             modules = [self._eff_tunable]
+        else:
+            modules = [self._vgg_tunable]
         params = []
         for module in modules:
             for param in module.parameters():
@@ -78,11 +93,19 @@ class EncoderCNNAttention(nn.Module):
                 with torch.no_grad():
                     x = self._resnet_base_forward(images)
                     out = self.net.layer4(x)
-        else:
+        elif self.backbone_kind == "efficientnet":
             if self.finetuning:
                 with torch.no_grad():
                     x = self._eff_prefix(images)
                 out = self._eff_tunable(x)
+            else:
+                with torch.no_grad():
+                    out = self.net.features(images)
+        else:
+            if self.finetuning:
+                with torch.no_grad():
+                    x = self._vgg_prefix(images)
+                out = self._vgg_tunable(x)
             else:
                 with torch.no_grad():
                     out = self.net.features(images)

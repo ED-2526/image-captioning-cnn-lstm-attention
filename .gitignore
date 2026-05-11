@@ -5,6 +5,7 @@ checkpoints_attention/
 data/coco2017/
 data/embeddings/
 data/flickr30k_hf/
+logs/
 wandb/
 .mplconfig/
 
