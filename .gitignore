@@ -1,1 +1,39 @@
+# Checkpoints and models
 checkpoints/
+checkpoints_attention/
+*.pth
+*.pt
+*.ckpt
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and environments
+.vscode/
+.idea/
+.venv/
+venv/
+env/
+.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Weights & Biases
+wandb/
+
+# Logs
+logs/
+lightning_logs/
+
+# Data
+data/
+
+# Manim output
+media/
+
+# OS generated files
+.DS_Store
+Thumbs.db
