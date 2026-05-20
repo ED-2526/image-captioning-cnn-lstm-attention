@@ -46,6 +46,17 @@ def caption_pil_image(pil_img, encoder, decoder, vocab, device) -> str:
     return vocab.decode(ids)
 
 
+@torch.no_grad()
+def caption_image_beam(image_path: str, encoder, decoder, vocab, device, beam_size: int = 3) -> str:
+    """Com caption_image però usa beam search en comptes de greedy."""
+    tfm = get_transform(train=False)
+    img = Image.open(image_path).convert("RGB")
+    x = tfm(img).unsqueeze(0).to(device)
+    feat = encoder(x)
+    ids = decoder.beam_search(feat, beam_size=beam_size)
+    return vocab.decode(ids)
+
+
 def main():
     p = argparse.ArgumentParser() # arguments
     p.add_argument("--image", required=True) # paht de la imarge que vols captionar
