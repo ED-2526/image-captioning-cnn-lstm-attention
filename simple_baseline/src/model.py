@@ -102,13 +102,6 @@ class DecoderLSTM(nn.Module):
         hiddens, _ = self.lstm(embeddings, states)     # [B, T-1, hidden_size]
         return self.linear(hiddens)                    # [B, T-1, vocab_size]
 
-    def step(self, token, states):
-        """Un sol pas de la LSTM: rep un token i retorna logits i nous estats."""
-        inp = self.embed(token).unsqueeze(1)           # [B, 1, embed]
-        hiddens, states = self.lstm(inp, states)       # [B, 1, hidden]
-        logits = self.linear(hiddens.squeeze(1))       # [B, vocab]
-        return logits, states
-
     @torch.no_grad()
     def sample(self, features, max_length=20):
         """Mode inferència: genera la caption greedy (paraula més probable a cada pas).
