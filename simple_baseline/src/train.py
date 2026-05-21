@@ -21,9 +21,11 @@ nltk.download("omw-1.4", quiet=True)
 from vocabulary import build_vocab, tokenize, load_glove
 from dataset import get_loaders
 from model import EncoderCNN, DecoderLSTM
+from losses import build_glove_similarity, TopKSemanticLoss
 
 
-def train_one_epoch(encoder, decoder, loader, criterion, optimizer, device, p_teacher=1.0):
+
+def train_one_epoch(encoder, decoder, loader, criterion, optimizer, device, p_teacher):
     """Entrena el model durant una epoch i retorna la loss mitjana.
 
     p_teacher=1.0 → teacher forcing pur (sempre rep la paraula real)
@@ -36,27 +38,14 @@ def train_one_epoch(encoder, decoder, loader, criterion, optimizer, device, p_te
     for images, captions, lengths in loader:
         images = images.to(device)
         captions = captions.to(device)
-        B, T = captions.shape
 
         features = encoder(images)                      # [B, embed_size]
-        states = decoder._init_hidden(features)
+        
+        outputs = decoder(features, captions, p_teacher)         # [B, T-1, vocab_size]
 
-        # Generem pas a pas: a cada timestep decidim si usar la paraula real o la predicció
-        inp = captions[:, 0]                            # primer input: <start>
-        outputs = []
-        for t in range(1, T):
-            emb = decoder.embed(inp).unsqueeze(1)              # [B, 1, embed]
-            out, states = decoder.lstm(emb, states)            # [B, 1, hidden]
-            logits = decoder.linear(out.squeeze(1))            # [B, vocab]
-            outputs.append(logits)
-
-            # Scheduled sampling: moneda per cada exemple del batch
-            use_teacher = torch.rand(B, device=device) < p_teacher
-            inp = torch.where(use_teacher, captions[:, t], logits.argmax(dim=1))
-
-        outputs = torch.stack(outputs, dim=1)           # [B, T-1, vocab_size]
         targets = captions[:, 1:]                       # [B, T-1]
-        loss = criterion(outputs.reshape(-1, outputs.size(-1)), targets.reshape(-1))
+        B, T, V = outputs.shape
+        loss = criterion(outputs.reshape(B * T, V), targets.reshape(B * T))
 
         optimizer.zero_grad()
         loss.backward()
@@ -120,13 +109,32 @@ def evaluate_bleu(encoder, decoder, vocab, captions_csv, val_ids, images_dir, de
 
     return bleu1, bleu4, meteor
 
+def evaluate(encoder, decoder, loader, criterion, device):
+    """Calcula la loss de validació (sense actualitzar pesos)."""
+    encoder.eval()
+    decoder.eval()
+    total_loss = 0
+
+    for images, captions, lengths in loader:
+        images = images.to(device)
+        captions = captions.to(device)
+
+        features = encoder(images)
+        
+        outputs = decoder(features, captions, p_teacher=0.0)  # p_teacher=0 → inferència pura sense teacher forcing
+        
+        targets = captions[:, 1:]
+        B, T, V = outputs.shape
+        loss = criterion(outputs.reshape(B * T, V), targets.reshape(B * T))
+        total_loss += loss.item()
+
+    return total_loss / len(loader)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--images-dir", required=True, help="Directori amb les imatges")
     parser.add_argument("--captions-csv", required=True, help="CSV amb columnes image,caption")
-    parser.add_argument("--encoder-size", type=int, default=256)
     parser.add_argument("--word-embed-size", type=int, default=256)
     parser.add_argument("--hidden-size", type=int, default=512)
     parser.add_argument("--glove-path", default=None, help="Ruta al fitxer GloVe (.txt). Opcional.")
@@ -153,7 +161,7 @@ def main():
         pickle.dump(vocab, f)
 
     # 2. Creem els DataLoaders
-    train_loader, _, val_ids = get_loaders(
+    train_loader, val_loader, val_ids = get_loaders(
         args.images_dir, args.captions_csv, vocab, args.batch_size
     )
     print(f"[data] train={len(train_loader)} batches  val={len(val_loader)} batches")
@@ -164,9 +172,8 @@ def main():
     if args.glove_path:
         glove_weights = load_glove(args.glove_path, vocab, glove_dim=args.word_embed_size)
 
-    encoder = EncoderCNN(encoder_size=args.encoder_size).to(device)
+    encoder = EncoderCNN(args.hidden_size).to(device)
     decoder = DecoderLSTM(
-        encoder_size=args.encoder_size,
         word_embed_size=args.word_embed_size,
         hidden_size=args.hidden_size,
         vocab_size=len(vocab),
@@ -176,39 +183,22 @@ def main():
     # 4. Loss i optimizer
     if args.topk > 0 and args.glove_path:
         # TopK Semantic Loss
-        # Pas 1: carreguem els vectors GloVe de cada paraula del vocabulari
-        glove = load_glove(args.glove_path, vocab, glove_dim=300)  # [V, 300]
-        glove = glove / (glove.norm(dim=1, keepdim=True) + 1e-8)   # normalitzem
-
-        # Pas 2: calculem la similitud entre totes les parelles de paraules
-        sim = glove @ glove.T   # [V, V]  sim[i,j] = similitud cosinus entre paraula i i j
-        sim = sim.to(device)
-
-        def criterion(outputs, targets):
-            # outputs: [N, V] logits del model
-            # targets: [N]   paraules correctes
-
-            # Pas 3: creem la distribució suau
-            # 0.8 a la paraula correcta + 0.2 repartit als k veïns més similars
-            soft = torch.zeros_like(outputs)
-            soft.scatter_(1, targets.unsqueeze(1), 0.8)             # pes a la correcta
-            neighbors = sim[targets].topk(args.topk, dim=1).indices # k veïns de cada paraula
-            soft.scatter_(1, neighbors, 0.2 / args.topk)            # pes als veïns
-
-            # Pas 4: cross-entropy amb la distribució suau
-            return -(soft * outputs.log_softmax(dim=1)).sum(dim=1).mean()
+        # Pas 1: calculem la similitud entre totes les parelles de paraules
+        soft_labels = build_glove_similarity(glove_weights).to(device)
+        criterion = TopKSemanticLoss(soft_labels, k=args.topk, alpha=0.2).to(device)
     else:
-        criterion = nn.CrossEntropyLoss(ignore_index=0)
+        criterion = nn.CrossEntropyLoss(ignore_index=0).to(device)
     # Només entrenem el decoder i la capa lineal de l'encoder (ResNet congelat)
     params = list(decoder.parameters()) + list(encoder.linear.parameters()) + list(encoder.bn.parameters())
     optimizer = torch.optim.Adam(params, lr=args.lr)
 
     # 5. Training loop
-    best_bleu4 = 0.0
+    best_meteor = 0.0
     for epoch in range(1, args.epochs + 1):
         # Scheduled sampling: p_teacher baixa linealment cada epoch
         p_teacher = args.ss_start - (args.ss_start - args.ss_end) * (epoch - 1) / max(args.epochs - 1, 1)
         train_loss = train_one_epoch(encoder, decoder, train_loader, criterion, optimizer, device, p_teacher)
+        val_loss = evaluate(encoder, decoder, val_loader, criterion, device)
 
         # Validació: el model genera les captions sol (sense veure les reals)
         bleu1, bleu4, meteor = evaluate_bleu(
@@ -217,8 +207,8 @@ def main():
         print(f"epoch {epoch}/{args.epochs}  train_loss={train_loss:.4f}  bleu1={bleu1:.3f}  bleu4={bleu4:.3f}  meteor={meteor:.3f}")
 
         # Guardem el millor model per BLEU-4
-        if bleu4 > best_bleu4:
-            best_bleu4 = bleu4
+        if meteor < best_meteor:
+            best_meteor = meteor
             torch.save({
                 "encoder": encoder.state_dict(),
                 "decoder": decoder.state_dict(),
