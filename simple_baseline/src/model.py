@@ -16,7 +16,7 @@ class EncoderCNN(nn.Module):
     Només s'entrena la capa lineal final.
     """
 
-    def __init__(self, encoder_size=256):
+    def __init__(self, hidden_size=256):
         super().__init__()
 
         # Carreguem ResNet50 preentrenada
@@ -26,9 +26,9 @@ class EncoderCNN(nn.Module):
         # list(resnet.children())[:-1] → tot excepte la capa fc final
         self.resnet = nn.Sequential(*list(resnet.children())[:-1])
 
-        # Capa lineal: 2048 (sortida de ResNet) → encoder_size
-        self.linear = nn.Linear(resnet.fc.in_features, encoder_size)
-        self.bn = nn.BatchNorm1d(encoder_size)
+        # Capa lineal: 2048 (sortida de ResNet) → hidden_size
+        self.linear = nn.Linear(resnet.fc.in_features, hidden_size)
+        self.bn = nn.BatchNorm1d(hidden_size)
 
         # Congelar ResNet: no volem que els seus pesos canviïn
         for param in self.resnet.parameters():
@@ -39,7 +39,7 @@ class EncoderCNN(nn.Module):
         with torch.no_grad():
             features = self.resnet(images)        # [B, 2048, 1, 1]
         features = features.flatten(1)            # [B, 2048]
-        features = self.bn(self.linear(features)) # [B, encoder_size]
+        features = self.bn(self.linear(features)) # [B, hidden_size]
         return features
 
 
@@ -55,37 +55,37 @@ class DecoderLSTM(nn.Module):
     - Inferència (sample): genera la caption sola, paraula per paraula
     """
 
-    def __init__(self, encoder_size, word_embed_size, hidden_size, vocab_size,
+    def __init__(self, word_embed_size, hidden_size, vocab_size,
                  num_layers=1, pretrained_embeddings=None):
         super().__init__()
-
-        # encoder_size:    mida del vector de la imatge (sortida de EncoderCNN)
-        # word_embed_size: mida dels vectors de les paraules (pot ser diferent!)
-        # hidden_size:     mida de l'estat intern de la LSTM
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
 
         self.embed = nn.Embedding(vocab_size, word_embed_size)
         # Si tenim GloVe, substituïm els pesos aleatoris pels preentrenats
         if pretrained_embeddings is not None:
             self.embed.weight = nn.Parameter(pretrained_embeddings)
+        self.embed.weight.requires_grad = False
+
         self.lstm = nn.LSTM(word_embed_size, hidden_size, num_layers, batch_first=True)
         self.linear = nn.Linear(hidden_size, vocab_size)
 
-        # Projectem el vector de la imatge [encoder_size] → [hidden_size]
+        # Projectem el vector de la imatge [hidden_size] → [hidden_size]
         # per inicialitzar h0 i c0 de la LSTM
-        self.img_to_h = nn.Linear(encoder_size, hidden_size)
-        self.img_to_c = nn.Linear(encoder_size, hidden_size)
+        self.img_to_h = nn.Linear(hidden_size, hidden_size)
+        self.img_to_c = nn.Linear(hidden_size, hidden_size)
 
     def _init_hidden(self, features):
         """Converteix el vector de la imatge en (h0, c0) per inicialitzar la LSTM.
 
-        features: [B, embed_size]
-        retorna:  ([1, B, hidden_size], [1, B, hidden_size])
+        features: [B, hidden_size]
+        retorna:  ([num_layers, B, hidden_size], [num_layers, B, hidden_size])
         """
-        h0 = self.img_to_h(features).unsqueeze(0)  # [1, B, hidden_size]
-        c0 = self.img_to_c(features).unsqueeze(0)  # [1, B, hidden_size]
+        h0 = self.img_to_h(features).unsqueeze(0).repeat(self.num_layers, 1, 1)  # [num_layers, B, hidden_size]
+        c0 = self.img_to_c(features).unsqueeze(0).repeat(self.num_layers, 1, 1)  # [num_layers, B, hidden_size]
         return h0, c0
 
-    def forward(self, features, captions):
+    def forward(self, features, captions, p_teacher):
         """Mode training amb teacher forcing.
 
         Args:
@@ -94,13 +94,22 @@ class DecoderLSTM(nn.Module):
         Returns:
             prediccions [B, T-1, vocab_size]
         """
-        # Usem la imatge per inicialitzar el hidden state
+        B, T = captions.shape
+        targets = captions[:, 1:]                 # [B, T-1] - target: paraules...<end>
+        inputs = captions[:,0]                    # [B] - primer token: <start>
+
+        outputs = []
         states = self._init_hidden(features)
 
-        # Convertim tokens a embeddings i passem per la LSTM
-        embeddings = self.embed(captions)              # [B, T-1, embed_size]
-        hiddens, _ = self.lstm(embeddings, states)     # [B, T-1, hidden_size]
-        return self.linear(hiddens)                    # [B, T-1, vocab_size]
+        for t in range(targets.size(1)):
+            embeddings = self.dropout(self.embed(inputs)).unsqueeze(1)  # [B, 1, embed_size]
+            out, states = self.lstm(embeddings, states)   # out: [B, 1, hidden_size]
+            logits = self.linear(out.squeeze(1))          # [B, vocab_size]
+            outputs.append(logits)
+
+            use_teacher = torch.rand(B, device=captions.device) < p_teacher
+            inputs = torch.where(use_teacher, targets[:,t], logits.argmax(dim=1).detach())
+        return torch.stack(outputs, dim=1)  # [B, T-1, vocab_size]                   # [B, T-1, vocab_size]
 
     @torch.no_grad()
     def sample(self, features, max_length=20):
