@@ -56,7 +56,7 @@ def train_one_epoch(encoder, decoder, loader, criterion, optimizer, device, p_te
 
 
 @torch.no_grad()
-def evaluate_bleu(encoder, decoder, vocab, captions_csv, val_ids, images_dir, device):
+def evaluate_bleu(encoder, decoder, loader, vocab, captions_csv, val_ids, images_dir, criterion, device):
     """Calcula BLEU-1, BLEU-4 i METEOR sobre el val set.
 
     Per a cada imatge del val set:
@@ -66,6 +66,21 @@ def evaluate_bleu(encoder, decoder, vocab, captions_csv, val_ids, images_dir, de
     encoder.eval()
     decoder.eval()
 
+    total_loss = 0
+    for images, captions, lengths in loader:
+        images = images.to(device)
+        captions = captions.to(device)
+
+        features = encoder(images)
+        outputs = decoder(features, captions, p_teacher=0.0)  # p_teacher=0 → inferència pura sense teacher forcing
+        
+        targets = captions[:, 1:]
+        B, T, V = outputs.shape
+        loss = criterion(outputs.reshape(B * T, V), targets.reshape(B * T))
+        total_loss += loss.item()
+
+    val_loss = total_loss / len(loader)
+    
     df = pd.read_csv(captions_csv)
     smooth = SmoothingFunction().method1
 
@@ -107,28 +122,7 @@ def evaluate_bleu(encoder, decoder, vocab, captions_csv, val_ids, images_dir, de
         for refs, hyp in zip(references_all, hypotheses_all)
     ) / len(hypotheses_all)
 
-    return bleu1, bleu4, meteor
-
-def evaluate(encoder, decoder, loader, criterion, device):
-    """Calcula la loss de validació (sense actualitzar pesos)."""
-    encoder.eval()
-    decoder.eval()
-    total_loss = 0
-
-    for images, captions, lengths in loader:
-        images = images.to(device)
-        captions = captions.to(device)
-
-        features = encoder(images)
-        
-        outputs = decoder(features, captions, p_teacher=0.0)  # p_teacher=0 → inferència pura sense teacher forcing
-        
-        targets = captions[:, 1:]
-        B, T, V = outputs.shape
-        loss = criterion(outputs.reshape(B * T, V), targets.reshape(B * T))
-        total_loss += loss.item()
-
-    return total_loss / len(loader)
+    return val_loss, bleu1, bleu4, meteor
 
 
 def main():
@@ -198,13 +192,12 @@ def main():
         # Scheduled sampling: p_teacher baixa linealment cada epoch
         p_teacher = args.ss_start - (args.ss_start - args.ss_end) * (epoch - 1) / max(args.epochs - 1, 1)
         train_loss = train_one_epoch(encoder, decoder, train_loader, criterion, optimizer, device, p_teacher)
-        val_loss = evaluate(encoder, decoder, val_loader, criterion, device)
 
         # Validació: el model genera les captions sol (sense veure les reals)
-        bleu1, bleu4, meteor = evaluate_bleu(
-            encoder, decoder, vocab, args.captions_csv, val_ids, args.images_dir, device
+        val_loss, bleu1, bleu4, meteor = evaluate_bleu(
+            encoder, decoder, val_loader, vocab, args.captions_csv, val_ids, args.images_dir, criterion, device
         )
-        print(f"epoch {epoch}/{args.epochs}  train_loss={train_loss:.4f}  bleu1={bleu1:.3f}  bleu4={bleu4:.3f}  meteor={meteor:.3f}")
+        print(f"epoch {epoch}/{args.epochs}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  valbleu1={bleu1:.3f}  bleu4={bleu4:.3f}  meteor={meteor:.3f}")
 
         # Guardem el millor model per BLEU-4
         if meteor < best_meteor:
