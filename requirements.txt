@@ -1,0 +1,11 @@
+torch
+torchvision
+pandas
+numpy
+pillow
+matplotlib
+nltk
+datasets
+gensim
+wandb
+tqdm

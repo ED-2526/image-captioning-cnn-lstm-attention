@@ -11,20 +11,20 @@ import pickle
 import time
 from pathlib import Path
 
-import pandas as pd  # per llegir el CSV de captions durant l'avaluació BLEU
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction  # mètriques BLEU
-from nltk.translate.meteor_score import meteor_score  # mètrica METEOR (té en compte sinònims)
+from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
+from nltk.translate.meteor_score import meteor_score
 
-from src.shared.dataset import get_loaders, split_image_ids, load_captions_df, get_loaders_hf  # dataloaders i divisió del dataset
+from src.shared.dataset import get_loaders, split_image_ids, load_captions_df, get_loaders_hf
 from src.attention.model import AttentionDecoder, EncoderCNNAttention
-from src.attention.sample import caption_image, caption_pil_image  # per generar captions durant l'avaluació BLEU
-from src.shared.vocabulary import Vocabulary, build_vocab, build_vocab_hf, simple_tokenize, load_glove_weights, load_word2vec_weights  # vocabulari i tokenitzador
-from src.shared.losses import SemanticCrossEntropyLoss, build_soft_labels  # loss semàntica
+from src.attention.sample import caption_image, caption_pil_image
+from src.shared.vocabulary import Vocabulary, build_vocab, build_vocab_hf, simple_tokenize, load_glove_weights, load_word2vec_weights
+from src.shared.losses import SemanticCrossEntropyLoss, build_soft_labels
 
 
 def parse_args():
@@ -49,33 +49,31 @@ def parse_args():
     p.add_argument("--log-step", type=int, default=20)
 
     p.add_argument("--glove-path", default=None,
-                   help="Ruta al fitxer GloVe. Si s'especifica, activa la loss semàntica i inicialitza embeddings.")
+                   help="Path to a GloVe text file used to initialize embeddings.")
     p.add_argument("--word2vec-path", default=None,
-                   help="Ruta al fitxer Word2Vec (.bin binari o .txt text amb capçalera). "
-                        "S'ignora si --glove-path també s'especifica.")
+                   help="Path to a Word2Vec .bin or .txt file. Ignored when --glove-path is set.")
     p.add_argument("--word2vec-binary", action="store_true",
-                   help="Indica que el fitxer Word2Vec és en format binari (.bin). "
-                        "Si no s'activa, es detecta automàticament per l'extensió.")
+                   help="Treat the Word2Vec file as binary.")
     p.add_argument("--no-semantic-loss", action="store_true",
-                   help="Usa CrossEntropyLoss estàndard fins i tot amb GloVe/Word2Vec (embeddings preentrenats però loss CE).")
+                   help="Use standard CrossEntropyLoss even with pretrained embeddings.")
     p.add_argument("--freeze-embeddings", action="store_true",
-                   help="Si s'activa, els pesos (GloVe o Word2Vec) no s'actualitzen durant l'entrenament.")
+                   help="Freeze pretrained word embeddings during training.")
     p.add_argument("--semantic-temp", type=float, default=10.0,
-                   help="Temperatura pels soft labels semàntics (amb --glove-path o --word2vec-path).")
+                   help="Temperature for semantic soft labels.")
     p.add_argument("--finetune-cnn-epoch", type=int, default=None,
-                   help="Epoch a partir de la qual es descongela layer4 de la CNN (None = mai).")
+                   help="Epoch after which ResNet layer4 is unfrozen.")
     p.add_argument("--ds-lambda", type=float, default=1.0,
-                   help="Pes de la Doubly Stochastic Attention regularització. 0 = desactivada.")
+                   help="Doubly stochastic attention regularization weight.")
     p.add_argument("--label-smoothing", type=float, default=0.0,
-                   help="Label smoothing per CrossEntropyLoss (0.0 = desactivat, 0.1 recomanat).")
+                   help="Label smoothing for CrossEntropyLoss. Use 0.0 to disable.")
     p.add_argument("--resume-from", default=None,
-                   help="Checkpoint des del qual continuar l'entrenament (ex: checkpoints/ckpt_epoch14.pt).")
+                   help="Checkpoint used to resume training.")
 
     # ── Flickr30k HuggingFace ──────────────────────────────────────────────
     p.add_argument("--flickr30k-hf", action="store_true",
-                   help="Usa el dataset Flickr30k de HuggingFace (nlphuji/flickr30k) en lloc del CSV.")
+                   help="Use the HuggingFace Flickr30k dataset instead of local CSV files.")
     p.add_argument("--flickr30k-hf-cache", default="dataset/flickr30k_hf",
-                   help="Carpeta cache del dataset HuggingFace.")
+                   help="HuggingFace dataset cache directory.")
 
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", default="image-captioning")

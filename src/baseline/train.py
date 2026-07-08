@@ -1,7 +1,7 @@
-"""Training script for the Flickr8k Image Captioning baseline.
+"""Training script for the Flickr8k image captioning baseline.
 
 Usage:
-    python -m src.train --epochs 5 --batch-size 32 --wandb
+    python -m src.baseline.train --epochs 5 --batch-size 32
 """
 from __future__ import annotations
 
@@ -11,100 +11,100 @@ import pickle
 import time
 from pathlib import Path
 
-import pandas as pd  # per llegir el CSV de captions durant l'avaluació BLEU
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn # aquí s'utilitza per crear la loss nn.CrossEntropyLoss()
-from torch.nn.utils.rnn import pack_padded_sequence # per treballar amb seqüències de longitud variable.
-from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction  # mètriques BLEU
-from nltk.translate.meteor_score import meteor_score  # mètrica METEOR (té en compte sinònims)
+import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence
+from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
+from nltk.translate.meteor_score import meteor_score
 
 from src.shared.dataset import get_loaders, get_loaders_hf, get_loaders_coco, split_image_ids, load_captions_df, COCODataset
 from src.shared.losses import SemanticCrossEntropyLoss, TopKSemanticLoss, build_glove_similarity
 
-from src.baseline.model import DecoderRNN, EncoderCNN # les dues xarxes principals.
-from src.baseline.sample import caption_image, caption_pil_image  # per generar captions durant l'avaluació BLEU
+from src.baseline.model import DecoderRNN, EncoderCNN
+from src.baseline.sample import caption_image, caption_pil_image
 from src.shared.vocabulary import Vocabulary, build_vocab, build_vocab_hf, simple_tokenize, load_glove_weights, load_word2vec_weights, load_fasttext_weights
 
 
-def parse_args(): # a llegir tots els arguments
+def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--images-dir", default="dataset/Images") # directori imatges
-    p.add_argument("--captions-csv", default="dataset/captions.txt") # path fitxer captions
-    p.add_argument("--vocab-path", default="dataset/vocab.pkl") # path on es guarda o carrega el vocab
-    p.add_argument("--checkpoints-dir", default="checkpoints") # directori on es guarden els checkpoints de l'entrenament (epoch, vocab_size, args...) i models entrenats
-    p.add_argument("--vocab-threshold", type=int, default=5) # mínim de vegades ha d'aparèixer una paraula per entrar al vocabulari (default 5, si no entra --> <unk>)
+    p.add_argument("--images-dir", default="dataset/Images")
+    p.add_argument("--captions-csv", default="dataset/captions.txt")
+    p.add_argument("--vocab-path", default="dataset/vocab.pkl")
+    p.add_argument("--checkpoints-dir", default="checkpoints")
+    p.add_argument("--vocab-threshold", type=int, default=5)
 
-    p.add_argument("--embed-size", type=int, default=256) # mida dels embeddings de paraules (sobreescrit per GloVe/W2V/FastText)
+    p.add_argument("--embed-size", type=int, default=256)
     p.add_argument("--encoder-size", type=int, default=None,
-                   help="Mida del vector de la imatge (sortida de EncoderCNN). Si no s'especifica, usa embed-size.")
-    p.add_argument("--hidden-size", type=int, default=512) # mida de l'estat ocult de la LSTM
-    p.add_argument("--num-layers", type=int, default=1) # nombre de capes apilades de la LSTM (profunditat)
-    p.add_argument("--dropout", type=float, default=0.5) # probabilitat de dropout a la LSTM (regularització que apaga neurones aleatòriament durant l'entrenament per evitar overfitting)
-    p.add_argument("--scheduled-sampling", action="store_true", help="Activa scheduled sampling (decay de teacher forcing)")
-    p.add_argument("--ss-start",  type=float, default=1.0, help="Probabilitat inicial de teacher forcing (default 1.0)")
-    p.add_argument("--ss-end",    type=float, default=0.3, help="Probabilitat mínima de teacher forcing (default 0.3)")
-    p.add_argument("--ss-epochs", type=int,   default=None, help="Epochs fins arribar a ss-end. Després es queda fix. Si None, usa totes les epochs.")
-    p.add_argument("--backbone", default="resnet152") # quina CNN preentrenada utilitzar com a encoder (resnet50 o resnet152)
+                   help="Image feature vector size. Defaults to --embed-size.")
+    p.add_argument("--hidden-size", type=int, default=512)
+    p.add_argument("--num-layers", type=int, default=1)
+    p.add_argument("--dropout", type=float, default=0.5)
+    p.add_argument("--scheduled-sampling", action="store_true", help="Enable scheduled sampling.")
+    p.add_argument("--ss-start",  type=float, default=1.0, help="Initial teacher forcing probability.")
+    p.add_argument("--ss-end",    type=float, default=0.3, help="Minimum teacher forcing probability.")
+    p.add_argument("--ss-epochs", type=int,   default=None, help="Epochs used to decay teacher forcing.")
+    p.add_argument("--backbone", default="resnet152")
 
-    p.add_argument("--epochs", type=int, default=20) # numero de passades completes del train
-    p.add_argument("--patience", type=int, default=999) # nombre d'epochs que esperarem sense millora en la val_loss abans de parar l'entrenament (early stopping)
-    p.add_argument("--batch-size", type=int, default=32) # quantes mostres entrenen el model a cada pas 
-    p.add_argument("--num-workers", type=int, default=2) # quants processos paral·lels carregaran dades
-    p.add_argument("--lr", type=float, default=1e-3) # de l'optimitzador Adam (la mida del pas d'actualització dels pesos)
-    p.add_argument("--log-step", type=int, default=20) # cada quants batches s'imprimeixen mètriques (loss, perplexity)
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--patience", type=int, default=999)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--log-step", type=int, default=20)
 
     p.add_argument("--glove-path", default=None,
-                   help="Ruta al fitxer GloVe per inicialitzar embeddings.")
+                   help="Path to a GloVe text file used to initialize embeddings.")
     p.add_argument("--word2vec-path", default=None,
-                   help="Ruta al fitxer Word2Vec (.bin o .txt). S'ignora si --glove-path s'especifica.")
+                   help="Path to a Word2Vec .bin or .txt file. Ignored when --glove-path is set.")
     p.add_argument("--word2vec-binary", action="store_true",
-                   help="Indica que el fitxer Word2Vec és en format binari (.bin).")
+                   help="Treat the Word2Vec file as binary.")
     p.add_argument("--fasttext-path", default=None,
-                   help="Ruta al fitxer FastText (.vec o .txt). S'ignora si --glove-path o --word2vec-path s'especifiquen.")
+                   help="Path to a FastText .vec or .txt file.")
     p.add_argument("--freeze-embeddings", action="store_true",
-                   help="Si s'activa, els pesos (GloVe o Word2Vec) no s'actualitzen durant l'entrenament.")
+                   help="Freeze pretrained word embeddings during training.")
     p.add_argument("--fine-tune-encoder", action="store_true",
-                   help="Desglacen layer4 del ResNet per fine-tuning. Millora les features però és més lent.")
+                   help="Unfreeze ResNet layer4 for CNN fine-tuning.")
     p.add_argument("--label-smoothing", type=float, default=0.0,
-                   help="Label smoothing per CrossEntropyLoss (0.0 = desactivat, 0.1 recomanat).")
+                   help="Label smoothing for CrossEntropyLoss. Use 0.0 to disable.")
     p.add_argument("--semantic-loss", action="store_true",
-                   help="Usa TopKSemanticLoss (top-10 GloVe) en lloc de CrossEntropyLoss. Requereix --glove-path.")
+                   help="Use TopKSemanticLoss instead of CrossEntropyLoss. Requires --glove-path.")
     p.add_argument("--semantic-loss-k", type=int, default=10,
-                   help="K per TopKSemanticLoss (default 10).")
+                   help="Number of similar words used by TopKSemanticLoss.")
     p.add_argument("--semantic-loss-alpha", type=float, default=0.2,
-                   help="Pes de les paraules similars a TopKSemanticLoss (default 0.2).")
+                   help="Total probability mass assigned to similar words in TopKSemanticLoss.")
 
     p.add_argument("--scheduler", default="plateau",
                    choices=["none", "plateau", "step", "cosine", "cyclic", "cyclic2",
                             "onecycle", "polynomial", "cosine_warm"],
-                   help="LR scheduler a utilitzar.")
+                   help="Learning-rate scheduler.")
     p.add_argument("--scheduler-step-size", type=int, default=5,
-                   help="Step size per StepLR (cada quantes epochs es redueix el LR).")
+                   help="StepLR interval in epochs.")
     p.add_argument("--scheduler-gamma", type=float, default=0.5,
-                   help="Factor de reducció per StepLR.")
+                   help="StepLR reduction factor.")
     p.add_argument("--scheduler-t0", type=int, default=5,
-                   help="T_0 per CosineAnnealingWarmRestarts (epochs del primer cicle).")
+                   help="T_0 for CosineAnnealingWarmRestarts.")
 
     # ── COCO 2017 ─────────────────────────────────────────────────────────
     p.add_argument("--coco", action="store_true",
-                   help="Usa el dataset COCO 2017 en lloc de Flickr8k.")
-    p.add_argument("--coco-dir", default="/home/datasets/coco",
-                   help="Directori arrel de COCO (amb train2017/, val2017/ i annotations/).")
+                   help="Use COCO 2017 instead of local Flickr-style CSV files.")
+    p.add_argument("--coco-dir", default="dataset/coco",
+                   help="COCO root directory with train2017/, val2017/ and annotations/.")
     p.add_argument("--coco-max-images", type=int, default=10000,
-                   help="Nombre màxim d'imatges de train de COCO a usar (default 10000).")
+                   help="Maximum number of COCO training images to use.")
 
     # ── Flickr30k HuggingFace ──────────────────────────────────────────────
     p.add_argument("--flickr30k-hf", action="store_true",
-                   help="Usa el dataset Flickr30k de HuggingFace (nlphuji/flickr30k) en lloc del CSV.")
+                   help="Use the HuggingFace Flickr30k dataset instead of local CSV files.")
     p.add_argument("--flickr30k-hf-cache", default="dataset/flickr30k_hf",
-                   help="Carpeta cache del dataset HuggingFace.")
+                   help="HuggingFace dataset cache directory.")
 
-    p.add_argument("--wandb", action="store_true") # argument que activa wandb
-    p.add_argument("--wandb-project", default="image-captioning") # nom del projecte a wandb
-    p.add_argument("--wandb-entity", default=None) # nom de l'entitat (usuari o organització) a wandb, si es deixa None s'utilitzarà l'entitat per defecte de l'usuari
-    p.add_argument("--run-name", default=None) # nom l'execució concreta, si es deixa None s'utilitzarà un nom generat automàticament basat en la data i hora actual
+    p.add_argument("--wandb", action="store_true")
+    p.add_argument("--wandb-project", default="image-captioning")
+    p.add_argument("--wandb-entity", default=None)
+    p.add_argument("--run-name", default=None)
     return p.parse_args()
 
 

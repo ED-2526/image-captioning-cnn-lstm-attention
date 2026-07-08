@@ -24,6 +24,17 @@ def build_glove_similarity(glove_weights: torch.Tensor) -> torch.Tensor:
     return w @ w.t()  # [vocab_size, vocab_size]
 
 
+def build_soft_labels(embedding_weights: torch.Tensor, temperature: float = 10.0) -> torch.Tensor:
+    """Build semantic soft labels from an embedding matrix.
+
+    Rows are cosine-similarity distributions over the vocabulary. A higher
+    temperature sharpens the distribution around the closest words.
+    """
+    weights = F.normalize(embedding_weights, dim=1)
+    similarities = weights @ weights.t()
+    return torch.softmax(similarities * temperature, dim=1)
+
+
 class SemanticCrossEntropyLoss(nn.Module):
     """CrossEntropy amb soft labels basades en TOTA la matriu de similitud GloVe.
 

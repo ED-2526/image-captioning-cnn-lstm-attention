@@ -139,7 +139,7 @@ class DecoderRNN(nn.Module):
     def beam_search(self, features: torch.Tensor, beam_size: int = 3) -> list[int]:
         """Beam search per a una sola imatge (B=1). Retorna la millor seqüència."""
         device = features.device
-        END_TOKEN = 2   # índex de <end>
+        end_token = 2
 
         # Estats inicials i primer token <start>
         h, c = self._init_hidden(features)          # [num_layers, 1, hidden]
@@ -162,7 +162,7 @@ class DecoderRNN(nn.Module):
         for _ in range(self.max_seq_length - 1):
             new_beams = []
             for score, seq, h_b, c_b in beams:
-                if seq[-1] == END_TOKEN:
+                if seq[-1] == end_token:
                     completed.append((score, seq))
                     continue
                 last_word = torch.tensor([seq[-1]], device=device)

@@ -49,7 +49,7 @@ def caption_image(image_path: str, encoder, decoder, vocab, device, beam_size: i
 
 @torch.no_grad()
 def caption_pil_image(pil_img, encoder, decoder, vocab, device, beam_size: int = 3) -> str:
-    """Com caption_image però rep un PIL.Image directament (per al dataset HuggingFace)."""
+    """Caption an in-memory PIL image."""
     tfm = get_transform(train=False)
     x = tfm(pil_img.convert("RGB")).unsqueeze(0).to(device)
     features = encoder(x)
@@ -66,7 +66,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--image", required=True)
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--vocab", default="data/flickr8k/vocab.pkl")
+    p.add_argument("--vocab", default="dataset/vocab.pkl")
     p.add_argument("--beam-size", type=int, default=3)
     args = p.parse_args()
 
